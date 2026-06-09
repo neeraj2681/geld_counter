@@ -1,23 +1,50 @@
 """
 Real-time wealth counter.
 
-Starts at INR 70,00,000 (70 lakh) and grows at an assumed 10% per annum,
-compounded smoothly every second. Growth is anchored to a start date
-(default: today).
+Starts at INR 70,00,000 (70 lakh) on a FIXED anchor date of 8 June 2026 (IST)
+and grows at an assumed 10% per annum, compounded smoothly every second.
+Because the start date is constant, the balance keeps continuing across days
+and sessions — it never resets.
 
-You can also add or subtract a lump sum at any time. Each adjustment is
-applied at the moment you click, and from that point onward it compounds
-at 10% along with the rest of the balance.
+You can also add or subtract a lump sum at any time. Each adjustment is applied
+at the moment you click and, from that point onward, compounds at 10% along with
+the rest of the balance. Adjustments are saved to disk so they persist too.
 """
 
-import time
-from datetime import date, datetime
+import json
+import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
 PRINCIPAL = 7_000_000        # INR 70,00,000
 ANNUAL_RATE = 0.10           # 10% per annum
 SECONDS_PER_YEAR = 365.25 * 24 * 60 * 60
+
+IST = ZoneInfo("Asia/Kolkata")
+START_DT = datetime(2026, 6, 8, 0, 0, 0, tzinfo=IST)   # FIXED anchor — never resets
+
+ADJ_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adjustments.json")
+
+
+def load_adjustments() -> list:
+    """Load saved adjustments from disk."""
+    if not os.path.exists(ADJ_FILE):
+        return []
+    try:
+        with open(ADJ_FILE) as f:
+            raw = json.load(f)
+        return [{"ts": datetime.fromisoformat(a["ts"]), "amount": float(a["amount"])} for a in raw]
+    except Exception:
+        return []
+
+
+def save_adjustments(adjustments: list) -> None:
+    """Persist adjustments to disk."""
+    data = [{"ts": a["ts"].isoformat(), "amount": a["amount"]} for a in adjustments]
+    with open(ADJ_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def format_inr(amount: float, decimals: int = 2) -> str:
@@ -52,8 +79,8 @@ def grow(amount: float, since: datetime, now: datetime) -> float:
 
 
 def current_value(now: datetime) -> float:
-    """Grown principal plus every grown adjustment."""
-    total = grow(PRINCIPAL, st.session_state.start_dt, now)
+    """Grown principal (from the fixed anchor) plus every grown adjustment."""
+    total = grow(PRINCIPAL, START_DT, now)
     for adj in st.session_state.adjustments:
         total += grow(adj["amount"], adj["ts"], now)
     return total
@@ -68,20 +95,18 @@ st.set_page_config(page_title="Wealth Counter", page_icon="💰", layout="center
 
 # ---- state ----
 if "adjustments" not in st.session_state:
-    st.session_state.adjustments = []   # list of {"ts": datetime, "amount": float}
-if "start_dt" not in st.session_state:
-    st.session_state.start_dt = datetime.combine(date.today(), datetime.min.time())
+    st.session_state.adjustments = load_adjustments()
 
 st.title("💰 Live Wealth Counter")
 st.caption("Starting at ₹70,00,000 · assumed 10% per annum")
 
 # ---- sidebar ----
 with st.sidebar:
-    st.header("Settings")
-    start_date = st.date_input("Growth start date", value=st.session_state.start_dt.date())
-    st.session_state.start_dt = datetime.combine(start_date, datetime.min.time())
-    st.write(f"Principal: ₹{format_inr(PRINCIPAL)}")
-    st.write(f"Rate: {ANNUAL_RATE * 100:.0f}% per annum")
+    st.header("Details")
+    st.write(f"**Anchor date:** {START_DT.strftime('%d %b %Y')} (IST)")
+    st.write(f"**Principal:** ₹{format_inr(PRINCIPAL)}")
+    st.write(f"**Rate:** {ANNUAL_RATE * 100:.0f}% per annum")
+    st.caption("Start date is fixed — the balance continues across days and never resets.")
 
 # ---- add / subtract controls ----
 st.subheader("Adjust the balance")
@@ -97,16 +122,18 @@ with col_sub:
     sub_clicked = st.button("➖ Subtract", use_container_width=True)
 
 if add_clicked and amount_x > 0:
-    st.session_state.adjustments.append({"ts": datetime.now(), "amount": amount_x})
+    st.session_state.adjustments.append({"ts": datetime.now(IST), "amount": amount_x})
+    save_adjustments(st.session_state.adjustments)
     st.rerun()
 if sub_clicked and amount_x > 0:
-    st.session_state.adjustments.append({"ts": datetime.now(), "amount": -amount_x})
+    st.session_state.adjustments.append({"ts": datetime.now(IST), "amount": -amount_x})
+    save_adjustments(st.session_state.adjustments)
     st.rerun()
 
 # ---- live counter (reruns on its own without blocking the buttons) ----
 @st.fragment(run_every=0.05)
 def counter():
-    now = datetime.now()
+    now = datetime.now(IST)
     value = current_value(now)
     gain = value - total_contributed()
     # instantaneous growth rate (₹ per second) so you can see it's live
@@ -129,12 +156,13 @@ counter()
 # ---- adjustment history ----
 if st.session_state.adjustments:
     with st.expander(f"Adjustment history ({len(st.session_state.adjustments)})"):
-        for i, adj in enumerate(reversed(st.session_state.adjustments)):
+        for adj in reversed(st.session_state.adjustments):
             sign = "＋" if adj["amount"] >= 0 else "－"
             st.write(
                 f"{sign} ₹{format_inr(abs(adj['amount']))}  ·  "
-                f"{adj['ts'].strftime('%d %b %Y, %H:%M:%S')}"
+                f"{adj['ts'].astimezone(IST).strftime('%d %b %Y, %H:%M:%S')} IST"
             )
     if st.button("Reset adjustments"):
         st.session_state.adjustments = []
+        save_adjustments([])
         st.rerun()
