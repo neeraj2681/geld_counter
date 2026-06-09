@@ -16,6 +16,8 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 PRINCIPAL = 7_000_000        # INR 70,00,000
@@ -78,12 +80,18 @@ def grow(amount: float, since: datetime, now: datetime) -> float:
     return amount * (1 + ANNUAL_RATE) ** years
 
 
-def current_value(now: datetime) -> float:
-    """Grown principal (from the fixed anchor) plus every grown adjustment."""
-    total = grow(PRINCIPAL, START_DT, now)
+def value_at(t: datetime) -> float:
+    """Value at time `t`: grown principal plus adjustments that already happened by `t`."""
+    total = grow(PRINCIPAL, START_DT, t)
     for adj in st.session_state.adjustments:
-        total += grow(adj["amount"], adj["ts"], now)
+        if adj["ts"] <= t:
+            total += grow(adj["amount"], adj["ts"], t)
     return total
+
+
+def current_value(now: datetime) -> float:
+    """Convenience wrapper for the value right now."""
+    return value_at(now)
 
 
 def total_contributed() -> float:
@@ -152,6 +160,62 @@ def counter():
     )
 
 counter()
+
+# ---- growth chart ----
+st.subheader("📈 Growth over time")
+
+FREQ = {
+    "Daily":     ("D",   "%d %b %Y"),
+    "Weekly":    ("W",   "%d %b %Y"),
+    "Monthly":   ("MS",  "%b %Y"),
+    "Quarterly": ("QS",  "%b %Y"),
+    "Yearly":    ("YS",  "%Y"),
+}
+
+c1, c2 = st.columns([1, 1])
+with c1:
+    granularity = st.selectbox("View by", list(FREQ.keys()), index=2)
+with c2:
+    horizon_years = st.slider("Years to project from anchor", 1, 50, 10)
+
+freq, _ = FREQ[granularity]
+start_naive = START_DT.replace(tzinfo=None)
+end_dt = start_naive + pd.DateOffset(years=horizon_years)
+points = pd.date_range(start=start_naive, end=end_dt, freq=freq)
+# always anchor the curve to the exact start so it begins at ₹70,00,000
+points = points.union(pd.DatetimeIndex([start_naive]))
+
+df = pd.DataFrame({
+    "Date": points,
+    "Value": [value_at(p.to_pydatetime().replace(tzinfo=IST)) for p in points],
+})
+
+# mark whether each point is past (actual) or future (projected)
+now_naive = datetime.now(IST).replace(tzinfo=None)
+df["Type"] = ["Actual" if d <= now_naive else "Projected" for d in df["Date"]]
+
+chart = (
+    alt.Chart(df)
+    .mark_line(point=alt.OverlayMarkDef(size=30))
+    .encode(
+        x=alt.X("Date:T", title="Time", axis=alt.Axis(format="%b %Y")),
+        y=alt.Y("Value:Q", title="Value (₹)", axis=alt.Axis(format=",.0f"),
+                scale=alt.Scale(zero=False)),
+        color=alt.Color("Type:N", title="",
+                        scale=alt.Scale(domain=["Actual", "Projected"],
+                                        range=["#16a34a", "#9ca3af"])),
+        tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b %Y"),
+                 alt.Tooltip("Value:Q", title="Value (₹)", format=",.2f")],
+    )
+    .properties(height=360)
+    .interactive()
+)
+st.altair_chart(chart, use_container_width=True)
+st.caption(
+    f"{granularity} view · {len(points)} points · "
+    f"{START_DT.strftime('%b %Y')} → {end_dt.strftime('%b %Y')}. "
+    "Green = elapsed, grey = projected at 10% p.a."
+)
 
 # ---- adjustment history ----
 if st.session_state.adjustments:
