@@ -161,50 +161,52 @@ def counter():
 
 counter()
 
-# ---- growth chart ----
-st.subheader("📈 Growth over time")
+# ---- growth chart (real growth only: anchor -> now) ----
+st.subheader("📈 Real growth over time")
 
-FREQ = {
-    "Daily":     ("D",   "%d %b %Y"),
-    "Weekly":    ("W",   "%d %b %Y"),
-    "Monthly":   ("MS",  "%b %Y"),
-    "Quarterly": ("QS",  "%b %Y"),
-    "Yearly":    ("YS",  "%Y"),
+start_naive = START_DT.replace(tzinfo=None)
+now_naive = datetime.now(IST).replace(tzinfo=None)
+
+# unit -> (pandas sampling freq, slider max, slider default, DateOffset builder)
+UNIT = {
+    "Days":   ("D",  365, 30, lambda n: pd.DateOffset(days=n)),
+    "Weeks":  ("W",  104, 12, lambda n: pd.DateOffset(weeks=n)),
+    "Months": ("MS", 120, 12, lambda n: pd.DateOffset(months=n)),
+    "Years":  ("YS",  50,  5, lambda n: pd.DateOffset(years=n)),
 }
 
 c1, c2 = st.columns([1, 1])
 with c1:
-    granularity = st.selectbox("View by", list(FREQ.keys()), index=2)
+    unit = st.selectbox("View by", list(UNIT.keys()), index=0)
+freq, max_count, default_count, offset_of = UNIT[unit]
 with c2:
-    horizon_years = st.slider("Years to project from anchor", 1, 50, 10)
+    count = st.slider(f"Look back ({unit.lower()})", 1, max_count, default_count)
 
-freq, _ = FREQ[granularity]
-start_naive = START_DT.replace(tzinfo=None)
-end_dt = start_naive + pd.DateOffset(years=horizon_years)
-points = pd.date_range(start=start_naive, end=end_dt, freq=freq)
-# always anchor the curve to the exact start so it begins at ₹70,00,000
-points = points.union(pd.DatetimeIndex([start_naive]))
+# window = last `count` units, but never earlier than the fixed anchor
+window_start = max(start_naive, now_naive - offset_of(count))
+
+# sampled points + the exact window edges + every adjustment moment (so steps show)
+idx = pd.date_range(start=window_start, end=now_naive, freq=freq)
+adj_pts = [
+    a["ts"].astimezone(IST).replace(tzinfo=None)
+    for a in st.session_state.adjustments
+    if window_start <= a["ts"].astimezone(IST).replace(tzinfo=None) <= now_naive
+]
+idx = idx.union(pd.DatetimeIndex([window_start, now_naive] + adj_pts)).sort_values()
 
 df = pd.DataFrame({
-    "Date": points,
-    "Value": [value_at(p.to_pydatetime().replace(tzinfo=IST)) for p in points],
+    "Date": idx,
+    "Value": [value_at(p.to_pydatetime().replace(tzinfo=IST)) for p in idx],
 })
-
-# mark whether each point is past (actual) or future (projected)
-now_naive = datetime.now(IST).replace(tzinfo=None)
-df["Type"] = ["Actual" if d <= now_naive else "Projected" for d in df["Date"]]
 
 chart = (
     alt.Chart(df)
-    .mark_line(point=alt.OverlayMarkDef(size=30))
+    .mark_line(color="#16a34a", point=alt.OverlayMarkDef(color="#16a34a", size=30))
     .encode(
-        x=alt.X("Date:T", title="Time", axis=alt.Axis(format="%b %Y")),
+        x=alt.X("Date:T", title="Time"),
         y=alt.Y("Value:Q", title="Value (₹)", axis=alt.Axis(format=",.0f"),
                 scale=alt.Scale(zero=False)),
-        color=alt.Color("Type:N", title="",
-                        scale=alt.Scale(domain=["Actual", "Projected"],
-                                        range=["#16a34a", "#9ca3af"])),
-        tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b %Y"),
+        tooltip=[alt.Tooltip("Date:T", title="Date", format="%d %b %Y, %H:%M"),
                  alt.Tooltip("Value:Q", title="Value (₹)", format=",.2f")],
     )
     .properties(height=360)
@@ -212,9 +214,9 @@ chart = (
 )
 st.altair_chart(chart, use_container_width=True)
 st.caption(
-    f"{granularity} view · {len(points)} points · "
-    f"{START_DT.strftime('%b %Y')} → {end_dt.strftime('%b %Y')}. "
-    "Green = elapsed, grey = projected at 10% p.a."
+    f"Real growth, {window_start.strftime('%d %b %Y')} → "
+    f"{now_naive.strftime('%d %b %Y')} · sampled {unit.lower()}. "
+    "Add/subtract events appear as steps in the line."
 )
 
 # ---- adjustment history ----
